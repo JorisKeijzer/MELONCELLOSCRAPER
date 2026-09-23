@@ -49,6 +49,15 @@ python scraper.py check
 
 `check` haalt voortaan ook telefoonnummers van de websites zelf.
 
+### Alles in één lijst
+
+```bash
+python scraper.py export
+open data/alles.csv
+```
+
+`data/alles.csv` combineert alles: de scraperresultaten (OpenStreetMap, websites, DuckDuckGo) en de handmatige lijst, zonder dubbele winkels. De handmatige kennis gaat vóór: een winkel waarvan we weten dat die Dolce Cilento verkoopt, staat op "verkoopt Dolce Cilento" ook als de scraper het op de website miste. Beste leads bovenaan (verkoopt meloncello, met e-mail), ketenfilialen lager.
+
 ### Uitkomst lezen
 
 - `verkoopt_dolce_cilento = ja`: gevonden. `gevonden_urls` laat zien waar, zodat je het kunt controleren.

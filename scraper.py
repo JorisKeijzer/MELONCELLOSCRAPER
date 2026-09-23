@@ -10,7 +10,8 @@ Gebruik:
     pip install -r requirements.txt
     python scraper.py discover          # -> data/winkels.csv
     python scraper.py check             # -> data/resultaat.csv (kan onderbroken en hervat worden)
-    python scraper.py all               # beide
+    python scraper.py export            # -> data/alles.csv: alles in één lijst, beste leads bovenaan
+    python scraper.py all               # discover + check + export
     python scraper.py verrijk           # winkels zonder website/telefoon gratis opzoeken (DuckDuckGo)
     python scraper.py verrijk --google-key SLEUTEL   # of via Google Maps (Places API)
 
@@ -752,9 +753,88 @@ def _gkey(shop):
     return f"{shop['naam']}|{shop['adres'] or shop['plaats']}".lower()
 
 
+# ----------------------------------------------------------------------------- stap 3: export
+
+EXPORT_CSV = os.path.join(DATA_DIR, "alles.csv")
+EXPORT_FIELDS = ["status", "meloncello", "naam", "plaats", "adres", "email", "telefoon", "website",
+                 "dolce_cilento_producten", "bewijs", "type", "bron", "opmerking"]
+
+
+def sells_meloncello(producten):
+    """'Meloncello' of 'Crema di Meloncello' telt, 'Watermeloncello' en '(meloncello niet bevestigd)' niet."""
+    return bool(re.search(r"(?<!water)meloncello(?! niet bevestigd)", producten.lower()))
+
+
+def export():
+    """Eén definitieve lijst: scraperresultaat + handmatige lijst, zonder dubbelen, beste leads bovenaan."""
+    if not os.path.exists(RESULT_CSV):
+        raise SystemExit(f"{RESULT_CSV} bestaat nog niet: draai eerst 'python scraper.py check'.")
+    with open(RESULT_CSV, newline="", encoding="utf-8-sig") as f:
+        scraped = list(csv.DictReader(f, delimiter=";"))
+    manual = {}
+    if os.path.exists(SEED_CSV):
+        with open(SEED_CSV, newline="", encoding="utf-8") as f:
+            for r in csv.DictReader(f, delimiter=";"):
+                manual[domain(normalize_site(r["website"]))] = r
+
+    rows, seen = [], set()
+    for r in scraped:
+        d = domain(r["website"]) if r["website"] else ""
+        key = d or f"{r['naam'].lower()}|{r['plaats'].lower()}|{r['adres'].lower()}"
+        if key in seen:
+            continue
+        seen.add(key)
+        m = manual.get(d) if d else None
+        status = {"ja": "verkoopt Dolce Cilento", "nee": "niet gevonden"}.get(r["verkoopt_dolce_cilento"], "onbekend")
+        melon = "ja" if r.get("meloncello_gevonden") == "ja" else ""
+        producten, bewijs, bron = "", r.get("gevonden_urls", ""), "scraper"
+        if m:
+            bron = "handmatig + scraper"
+            producten = m["dolce_cilento_producten"]
+            bewijs = bewijs or m["bron_productpagina"]
+            status = "verkoopt Dolce Cilento"  # alle handmatige verkooppunten zijn met de hand bevestigd
+            melon = melon or ("ja" if sells_meloncello(producten) else "")
+        emails = [e.strip() for e in (r["emails"] or "").split(",") if e.strip()]
+        if m and m["email"] and m["email"].lower() not in emails:
+            emails.insert(0, m["email"].lower())
+        rows.append({
+            "status": status, "meloncello": melon, "naam": (m or {}).get("bedrijf") or r["naam"],
+            "plaats": r["plaats"] or (m or {}).get("plaats", ""), "adres": r["adres"] or (m or {}).get("adres", ""),
+            "email": ", ".join(emails), "telefoon": r["telefoon"] or (m or {}).get("telefoon", ""),
+            "website": r["website"], "dolce_cilento_producten": producten, "bewijs": bewijs,
+            "type": "keten-filiaal" if is_chain(r["naam"]) else ((m or {}).get("type") or ""),
+            "bron": bron, "opmerking": r.get("fout", ""),
+        })
+    # handmatige verkooppunten die (nog) niet in het scraperresultaat zitten
+    for d, m in manual.items():
+        if d in seen:
+            continue
+        seen.add(d)
+        rows.append({"status": "verkoopt Dolce Cilento",
+                     "meloncello": "ja" if sells_meloncello(m["dolce_cilento_producten"]) else "",
+                     "naam": m["bedrijf"], "plaats": m["plaats"], "adres": m["adres"], "email": m["email"],
+                     "telefoon": m["telefoon"], "website": normalize_site(m["website"]),
+                     "dolce_cilento_producten": m["dolce_cilento_producten"], "bewijs": m["bron_productpagina"],
+                     "type": m["type"], "bron": "handmatig", "opmerking": ""})
+
+    order = {"verkoopt Dolce Cilento": 0, "onbekend": 1, "niet gevonden": 2}
+    rows.sort(key=lambda r: (order[r["status"]], r["meloncello"] != "ja", r["type"] == "keten-filiaal",
+                             not r["email"], not r["telefoon"], r["plaats"].lower(), r["naam"].lower()))
+    with open(EXPORT_CSV, "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.DictWriter(f, fieldnames=EXPORT_FIELDS, delimiter=";")
+        w.writeheader()
+        w.writerows(rows)
+    count = lambda cond: sum(1 for r in rows if cond(r))
+    print(f"{len(rows)} winkels -> {EXPORT_CSV}")
+    print(f"  verkoopt Dolce Cilento: {count(lambda r: r['status'] == 'verkoopt Dolce Cilento')} "
+          f"(waarvan meloncello: {count(lambda r: r['status'] == 'verkoopt Dolce Cilento' and r['meloncello'] == 'ja')})")
+    print(f"  met e-mail: {count(lambda r: r['email'])}, met telefoon: {count(lambda r: r['telefoon'])}, "
+          f"zonder e-mail en telefoon: {count(lambda r: not r['email'] and not r['telefoon'])}")
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("stap", choices=["discover", "verrijk", "check", "all"])
+    p.add_argument("stap", choices=["discover", "verrijk", "check", "export", "all"])
     p.add_argument("--google-key", default=os.environ.get("GOOGLE_MAPS_API_KEY", ""),
                    help="optioneel: Google Maps API-sleutel voor 'verrijk' (standaard gratis via DuckDuckGo)")
     p.add_argument("--extra", help="bestand met extra website-URL's, één per regel")
@@ -775,6 +855,8 @@ def main():
             drop_skipped()
             args.workers = 1
         check(args.extra, args.workers)
+    if args.stap in ("export", "all"):
+        export()
 
 
 if __name__ == "__main__":
