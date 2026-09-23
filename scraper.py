@@ -596,7 +596,7 @@ PHONE_TRUST_DOMAINS = ("openingstijden.nl", "telefoonboek.nl", "detelefoongids.n
 CHAIN_RE = re.compile(
     r"^\s*(gall\s*(&|en|and)?\s*gall|mitra|dirck\s*(iii|3)|albert\s*heijn|ah\b|jumbo|lidl|aldi|plus\b|coop\b|spar\b|"
     r"vomar|dekamarkt|hoogvliet|dirk\b|poiesz|boni\b|jan\s*linders|nettorama|em-?t[eé]|mcd\b|hema\b|action\b|"
-    r"drankdozijn|drankenhandel\s*dirck)", re.I)
+    r"drankdozijn|drankenhandel\s*dirck|(wijnkoperij\s*)?henri\s*bloem)", re.I)
 
 
 def is_chain(name):
