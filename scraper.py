@@ -11,7 +11,8 @@ Gebruik:
     python scraper.py discover          # -> data/winkels.csv
     python scraper.py check             # -> data/resultaat.csv (kan onderbroken en hervat worden)
     python scraper.py all               # beide
-    python scraper.py verrijk --google-key SLEUTEL   # winkels zonder website opzoeken in Google Maps
+    python scraper.py verrijk           # winkels zonder website/telefoon gratis opzoeken (DuckDuckGo)
+    python scraper.py verrijk --google-key SLEUTEL   # of via Google Maps (Places API)
 
     python scraper.py check --extra urls.txt   # extra websites (één per regel) meenemen
     python scraper.py discover --import kvk_slijterijen.csv   # eigen lijst (bv. KvK-export) toevoegen
@@ -28,7 +29,8 @@ import threading
 import time
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.parse import quote_plus, urljoin, urlparse
+import random
+from urllib.parse import parse_qs, quote_plus, urljoin, urlparse
 from urllib.robotparser import RobotFileParser
 
 import requests
@@ -150,6 +152,31 @@ def extract_emails(html):
     text = soup.get_text(" ").replace("[at]", "@").replace("(at)", "@").replace(" @ ", "@")
     found.update(EMAIL_RE.findall(text))
     return {e.strip().strip(".").lower() for e in found if e and not JUNK_EMAIL.search(e)}
+
+
+PHONE_RE = re.compile(r"(?<![\d+])(?:\+31|0031|0)(?:[\s\-.()]*\d){9}(?!\d)")
+
+
+def normalize_phone(raw):
+    digits = re.sub(r"\D", "", raw)
+    if digits.startswith("0031"):
+        digits = "0" + digits[4:]
+    elif digits.startswith("31") and raw.strip().startswith("+"):
+        digits = "0" + digits[2:]
+    if len(digits) != 10 or not digits.startswith("0") or digits.startswith("00"):
+        return ""
+    return digits
+
+
+def extract_phones(html):
+    """Nederlandse telefoonnummers; tel:-links eerst, daarna nummers in de tekst (meest voorkomend eerst)."""
+    soup = BeautifulSoup(html, "html.parser")
+    found = []
+    for a in soup.select('a[href^="tel:"]'):
+        found.append(normalize_phone(a["href"][4:]))
+    found += [normalize_phone(m) for m in PHONE_RE.findall(soup.get_text(" "))]
+    found = [p for p in found if p and not p.startswith(("0800", "0900", "0906", "0909"))]
+    return sorted(dict.fromkeys(found), key=lambda p: -found.count(p))
 
 
 def contact_links(base, html):
@@ -319,12 +346,14 @@ def search_matches(base, rp):
     return [], False, None
 
 
-def find_emails(base, rp, known):
+def find_contacts(base, rp, known):
     emails = set(filter(None, [known.lower()])) if known else set()
+    phones = []
     home, final = fetch(base)
     if home is None:
-        return emails, False
+        return emails, phones, False
     emails |= extract_emails(home)
+    phones += extract_phones(home)
     pages = contact_links(final or base, home) + [base + p for p in CONTACT_PATHS]
     for page in list(dict.fromkeys(pages))[:MAX_CONTACT_PAGES]:
         if not rp.can_fetch(USER_AGENT, page):
@@ -332,7 +361,8 @@ def find_emails(base, rp, known):
         html, _ = fetch(page)
         if html:
             emails |= extract_emails(html)
-    return emails, True
+            phones += extract_phones(html)
+    return emails, list(dict.fromkeys(phones)), True
 
 
 def check_shop(shop):
@@ -342,8 +372,10 @@ def check_shop(shop):
                   gevonden_urls="", methode="", fout="")
     try:
         rp, sitemaps = robots_for(base)
-        emails, reachable = find_emails(base, rp, shop.get("email", ""))
+        emails, phones, reachable = find_contacts(base, rp, shop.get("email", ""))
         result["emails"] = ", ".join(sorted(emails))
+        if not result["telefoon"] and phones:
+            result["telefoon"] = phones[0]
         if not reachable:
             result["fout"] = "website niet bereikbaar"
             return result
@@ -507,8 +539,9 @@ def check(extra_file=None, workers=8):
 GOOGLE_PLACES_URL = os.environ.get("GOOGLE_PLACES_URL", "https://places.googleapis.com/v1/places:searchText")
 GOOGLE_CACHE_JSONL = os.path.join(DATA_DIR, "google_cache.jsonl")
 GOOGLE_FIELDS = "places.displayName,places.formattedAddress,places.nationalPhoneNumber,places.websiteUri"
-NAME_NOISE = re.compile(r"\b(slijterij|wijnhandel|wijnkoperij|drankenhandel|dranken|drankhandel|b\.?v\.?|v\.?o\.?f\.?|"
-                        r"en|&|de|het|van|'t)\b", re.I)
+NAME_NOISE = re.compile(r"\b(slijterij|slijter|wijnhandel|wijnkoperij|wijnhuis|wijnen|wijn|wines?|drankenhandel|dranken|"
+                        r"drankhandel|drank|drinks|bier|bieren|beer|bierwinkel|speciaalbier|liquors?|spirits|winkel|"
+                        r"shop|store|delicatessen|deli|b\.?v\.?|v\.?o\.?f\.?|en|de|het|van|'t)\b", re.I)
 
 
 def name_similarity(a, b):
@@ -540,16 +573,111 @@ def google_lookup(shop, key):
     return {}
 
 
-def verrijk(key):
-    """Zoek winkels zonder website of telefoonnummer op in Google Maps (Places API) en vul website/telefoon aan."""
-    if not key:
-        raise SystemExit("Geen Google API-sleutel. Gebruik --google-key SLEUTEL of zet GOOGLE_MAPS_API_KEY.")
+SEARCH_URL = os.environ.get("SEARCH_URL", "https://html.duckduckgo.com/html/")
+SEARCH_CACHE_JSONL = os.path.join(DATA_DIR, "zoek_cache.jsonl")
+# gidsen/sociale media: geen eigen website van de winkel (wel bruikbaar voor telefoonnummers)
+DIRECTORY_DOMAINS = (
+    "facebook.com", "instagram.com", "linkedin.com", "twitter.com", "x.com", "youtube.com", "tiktok.com",
+    "google.", "openingstijden.nl", "cylex.nl", "telefoonboek.nl", "detelefoongids.nl", "goudengids.nl",
+    "drimble.nl", "yelp.", "tripadvisor.", "kvk.nl", "oozo.nl", "bedrijvenregister.nl", "slijterijindebuurt.nl",
+    "slijterindebuurt.nl", "slijterijen.com", "slijterijen-wijnhandels.nl", "companyinfo.nl", "zakelijkeregister.nl",
+    "firmania.nl", "bottin.nl", "vymaps.com", "cybo.com", "top10place.com", "findglocal.com", "untappd.com",
+    "wijnkring.nl", "nederlandinbedrijf.nl", "vind-open.nl", "openingstijden.com", "infobel.com", "bedrijfsinformatie.nl",
+    "bedrijvenwegwijzer.nl", "alleadressen.nl", "hotfrog.nl", "wikipedia.org", "folderz.nl", "reclamefolder.nl",
+    "thuisbezorgd.nl", "marktplaats.nl", "bol.com", "werkzoeken.nl", "indeed.", "vindbedrijf.nl", "waarkopen.nl",
+    "duckduckgo.com", "bing.com", "startpagina.nl", "zoover.nl", "funda.nl", "wanderlog.com", "locale.online",
+    "lusha.com", "reviewgo.nl", "trustpilot.com", "kiyoh.com", "klantenvertellen.nl",
+)
+PHONE_TRUST_DOMAINS = ("openingstijden.nl", "telefoonboek.nl", "detelefoongids.nl", "goudengids.nl", "cylex.nl",
+                       "slijterijindebuurt.nl", "slijterindebuurt.nl", "vind-open.nl", "firmania.nl", "bottin.nl")
+
+
+class Blocked(Exception):
+    pass
+
+
+def is_directory(url):
+    d = domain(url)
+    return any(d == x or d.endswith("." + x) or (x.endswith(".") and x in d) for x in DIRECTORY_DOMAINS)
+
+
+def domain_matches_name(url, name):
+    """Lijkt het domein op de winkelnaam? (bijv. slijterijdehelm.nl voor 'Slijterij-Wijnhandel De Helm')"""
+    root = domain(url).split(".")[0].replace("-", "")
+    tokens = [t for t in re.findall(r"[a-z0-9]+", NAME_NOISE.sub(" ", name.lower())) if len(t) >= 4]
+    if tokens and any(t in root for t in tokens):
+        return True
+    joined = "".join(re.findall(r"[a-z0-9]+", name.lower()))
+    return difflib.SequenceMatcher(None, joined, root).ratio() >= 0.7
+
+
+def search_results(query):
+    """DuckDuckGo HTML-resultaten: lijst van (url, titel, snippet)."""
+    r = requests.post(SEARCH_URL, data={"q": query, "kl": "nl-nl"}, timeout=20,
+                      headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
+                                             "(KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+                               "Accept-Language": "nl-NL,nl;q=0.9"})
+    if r.status_code in (202, 403, 429) or "anomaly" in r.text.lower():
+        raise Blocked(f"status {r.status_code}")
+    r.raise_for_status()
+    soup = BeautifulSoup(r.text, "html.parser")
+    results = []
+    for res in soup.select(".result"):
+        a = res.select_one("a.result__a")
+        if not a or not a.get("href"):
+            continue
+        href = a["href"]
+        if "uddg=" in href:
+            href = parse_qs(urlparse(urljoin("https://duckduckgo.com", href)).query).get("uddg", [href])[0]
+        snippet = res.select_one(".result__snippet")
+        results.append((href, a.get_text(" ", strip=True), snippet.get_text(" ", strip=True) if snippet else ""))
+    return results
+
+
+def free_lookup(shop):
+    """Zoek de winkel op via DuckDuckGo: eigen website + telefoonnummer uit de resultaten/gidsen."""
+    query = " ".join(filter(None, [shop["naam"], shop["plaats"] or shop["adres"]]))
+    results = search_results(query)
+    out = {}
+    for url, title, _ in results:
+        if not is_directory(url) and domain_matches_name(url, shop["naam"]):
+            out["website"] = normalize_site(url)
+            break
+    # telefoon: alleen uit resultaten die duidelijk over deze winkel gaan
+    phones = []
+    for url, title, snippet in results:
+        if name_similarity(shop["naam"], title) >= 0.6 or (shop["naam"].lower() in (title + " " + snippet).lower()):
+            phones += [normalize_phone(p) for p in PHONE_RE.findall(snippet)]
+    phones = [p for p in phones if p]
+    if not phones:
+        for url, title, _ in results[:6]:
+            if domain(url).endswith(PHONE_TRUST_DOMAINS) and name_similarity(shop["naam"], title) >= 0.6:
+                html, _ = fetch(url)
+                if html:
+                    phones = extract_phones(html)[:1]
+                    emails = [e for e in extract_emails(html) if not is_directory("https://" + e.split("@")[-1])]
+                    if emails:
+                        out["email"] = emails[0]
+                    if phones:
+                        break
+    if phones:
+        out["telefoon"] = max(set(phones), key=phones.count)
+    return out
+
+
+def verrijk(key=""):
+    """Zoek winkels zonder website of telefoonnummer op en vul website/telefoon/adres aan.
+    Standaard gratis via DuckDuckGo; met een Google-sleutel via de Google Places API."""
+    if key:
+        lookup, cache_path, pause, label = (lambda shop: google_lookup(shop, key)), GOOGLE_CACHE_JSONL, (0.1, 0.1), "Google"
+    else:
+        lookup, cache_path, pause, label = free_lookup, SEARCH_CACHE_JSONL, (3.0, 6.0), "DuckDuckGo"
     with open(SHOPS_CSV, newline="", encoding="utf-8") as f:
         shops = list(csv.DictReader(f, delimiter=";"))
 
     cache = {}
-    if os.path.exists(GOOGLE_CACHE_JSONL):
-        with open(GOOGLE_CACHE_JSONL, encoding="utf-8") as f:
+    if os.path.exists(cache_path):
+        with open(cache_path, encoding="utf-8") as f:
             for line in f:
                 try:
                     r = json.loads(line)
@@ -558,21 +686,30 @@ def verrijk(key):
                     pass
 
     todo = [s for s in shops if s["naam"] and (not s["website"] or not s["telefoon"])]
-    print(f"{len(todo)} winkels zonder website of telefoon, {sum(k in cache for k in map(_gkey, todo))} al opgezocht")
+    left = sum(_gkey(s) not in cache for s in todo)
+    print(f"{len(todo)} winkels zonder website of telefoon, {len(todo) - left} al opgezocht. "
+          f"Opzoeken via {label}" + (f" (~{left * 5 // 60} minuten)" if not key else "") + "...")
     found_sites = found_phones = 0
-    with open(GOOGLE_CACHE_JSONL, "a", encoding="utf-8") as cache_f:
+    blocked = False
+    with open(cache_path, "a", encoding="utf-8") as cache_f:
         for i, shop in enumerate(todo, 1):
             k = _gkey(shop)
-            if k not in cache:
+            if k not in cache and not blocked:
                 try:
-                    cache[k] = dict(google_lookup(shop, key), _key=k)
+                    cache[k] = dict(lookup(shop), _key=k)
+                except Blocked:
+                    blocked = True
+                    print(f"\n{label} blokkeert tijdelijk. De voortgang is bewaard: probeer het over een uur opnieuw "
+                          f"met 'python scraper.py verrijk'. Wat al gevonden is wordt nu opgeslagen.\n")
                 except requests.RequestException as e:
                     print(f"[{i}/{len(todo)}] {shop['naam']}: fout ({e})")
-                    continue
-                cache_f.write(json.dumps(cache[k], ensure_ascii=False) + "\n")
-                cache_f.flush()
-                time.sleep(0.1)
-            g = cache[k]
+                else:
+                    cache_f.write(json.dumps(cache[k], ensure_ascii=False) + "\n")
+                    cache_f.flush()
+                    time.sleep(random.uniform(*pause))
+            g = cache.get(k)
+            if not g:
+                continue
             new_site = normalize_site(g.get("website", "")) if not shop["website"] else ""
             if new_site:
                 shop["website"] = new_site
@@ -580,19 +717,21 @@ def verrijk(key):
             if not shop["telefoon"] and g.get("telefoon"):
                 shop["telefoon"] = g["telefoon"]
                 found_phones += 1
+            if not shop["email"] and g.get("email"):
+                shop["email"] = g["email"]
             if not shop["adres"] and g.get("adres"):
                 shop["adres"] = g["adres"]
-            if g:
-                shop["bron"] = shop["bron"] + "+google" if "google" not in shop["bron"] else shop["bron"]
-            print(f"[{i}/{len(todo)}] {shop['naam']}: " + (", ".join(filter(None, [
-                new_site and f"website {new_site}", g.get("telefoon") and f"tel {g['telefoon']}"])) or "niets gevonden"))
+            if len(g) > 1 and label.lower() not in shop["bron"]:
+                shop["bron"] = f"{shop['bron']}+{label.lower()}"
+            if k in cache and not blocked:
+                print(f"[{i}/{len(todo)}] {shop['naam']}: " + (", ".join(filter(None, [
+                    new_site and f"website {new_site}", g.get("telefoon") and f"tel {g['telefoon']}"])) or "niets gevonden"))
 
-    # ketens: nieuwe websites kunnen samenvallen met al bekende; dubbele domeinen zijn geen probleem voor check()
     with open(SHOPS_CSV, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=FIELDS, delimiter=";")
         w.writeheader()
         w.writerows(shops)
-    print(f"\nKlaar: {found_sites} nieuwe websites en {found_phones} nieuwe telefoonnummers -> {SHOPS_CSV}")
+    print(f"\n{found_sites} nieuwe websites en {found_phones} nieuwe telefoonnummers opgeslagen in {SHOPS_CSV}")
     print("Draai nu 'python scraper.py check' om de nieuwe websites te checken en e-mailadressen op te halen.")
 
 
@@ -604,7 +743,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("stap", choices=["discover", "verrijk", "check", "all"])
     p.add_argument("--google-key", default=os.environ.get("GOOGLE_MAPS_API_KEY", ""),
-                   help="Google Maps API-sleutel voor 'verrijk' (of zet GOOGLE_MAPS_API_KEY)")
+                   help="optioneel: Google Maps API-sleutel voor 'verrijk' (standaard gratis via DuckDuckGo)")
     p.add_argument("--extra", help="bestand met extra website-URL's, één per regel")
     p.add_argument("--import", dest="imports", action="append", default=[],
                    help="eigen CSV met winkels (bijv. KvK-export); mag vaker gebruikt worden")

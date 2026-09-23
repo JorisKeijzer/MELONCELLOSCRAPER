@@ -2,3 +2,4 @@ data/cache.jsonl
 __pycache__/
 data/bezig.txt
 data/google_cache.jsonl
+data/zoek_cache.jsonl

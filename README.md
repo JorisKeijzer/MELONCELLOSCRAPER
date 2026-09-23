@@ -32,16 +32,22 @@ python scraper.py check
 
 Kolomnamen worden automatisch herkend (bijv. `Handelsnaam`, `Vestigingsplaats`, `Internetadres`, `Telefoonnummer`, `E-mail`). Zowel `;` als `,` werkt als scheidingsteken. Winkels zonder website komen ook in `resultaat.csv`, met status "onbekend" en de contactgegevens die bekend zijn.
 
-### Winkels zonder website: Google Maps
+### Winkels zonder website of telefoonnummer
 
-Voor winkels zonder website zoekt `verrijk` naam + plaats op in Google Maps (Places API) en vult telefoonnummer en website aan. Nieuw gevonden websites worden daarna door `check` gewoon gecheckt, ook op e-mailadressen.
+`verrijk` zoekt winkels zonder website of telefoonnummer op naam + plaats op via DuckDuckGo (gratis, geen sleutel nodig). Uit de zoekresultaten haalt hij de eigen website van de winkel en het telefoonnummer (ook via gidsen zoals openingstijden.nl). Nieuw gevonden websites worden daarna door `check` gecheckt, ook op e-mailadressen.
 
 ```bash
-python scraper.py verrijk --google-key JOUW_SLEUTEL
+python scraper.py verrijk
 python scraper.py check
 ```
 
-Een resultaat wordt alleen overgenomen als de naam in Google overeenkomt met de winkel, zodat je niet per ongeluk de Gall & Gall om de hoek krijgt. Opgezochte winkels worden bewaard in `data/google_cache.jsonl`, dus bij een tweede keer betaal je niet opnieuw. Draai `discover` na `verrijk` niet opnieuw: dan wordt `winkels.csv` overschreven (de Google-cache blijft wel bestaan, dus opnieuw `verrijk` kost niets).
+- Rustig tempo (één zoekopdracht per 3-6 seconden), dus reken op ongeveer 5 seconden per winkel.
+- Blokkeert DuckDuckGo tijdelijk, dan stopt hij en bewaart hij wat al gevonden is; probeer het na een uur opnieuw, hij gaat verder waar hij was.
+- Een website telt alleen als het domein op de winkelnaam lijkt; een telefoonnummer alleen uit resultaten die over die winkel gaan.
+- Liever Google Maps? `python scraper.py verrijk --google-key SLEUTEL` gebruikt de Google Places API (creditcard nodig, binnen de gratis maandlimiet meestal €0).
+- Draai `discover` na `verrijk` niet opnieuw: dan wordt `winkels.csv` overschreven (de zoekcache blijft bewaard, dus opnieuw `verrijk` gaat snel).
+
+`check` haalt voortaan ook telefoonnummers van de websites zelf.
 
 ### Uitkomst lezen
 
