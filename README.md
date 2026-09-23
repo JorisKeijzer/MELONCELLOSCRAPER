@@ -21,7 +21,18 @@ python scraper.py all
 
 De check kun je onderbreken (Ctrl+C) en daarna opnieuw starten; winkels die al gecheckt zijn worden overgeslagen. Wil je opnieuw beginnen, verwijder dan `data/cache.jsonl`.
 
-### Alle 2.923 slijterijen
+### Alle 2.923 slijterijen: gidsen (gratis)
+
+```bash
+python scraper.py gidsen      # ±1-2 uur; kan onderbroken en hervat worden
+python scraper.py discover    # voegt de gidsen toe aan data/winkels.csv
+```
+
+`gidsen` loopt slijterindebuurt.nl, slijterijen.com en slijterijindebuurt.nl door (samen enkele duizenden vermeldingen) en haalt per winkel naam, adres, telefoon en website op, uit de gestructureerde bedrijfsgegevens op de pagina of anders uit de paginatekst. Contactgegevens van de gids zelf worden genegeerd. Dezelfde winkel uit verschillende bronnen wordt samengevoegd (zelfde website, of zelfde naam + postcode/plaats).
+
+Of alles in één keer: `python scraper.py all` (gidsen, discover, verrijk, check, export).
+
+### KvK-export of eigen lijst
 
 OpenStreetMap heeft niet elke slijterij. Voor een volledige lijst heb je een export uit het KvK Handelsregister nodig (SBI-code **47250**, "Winkels in dranken"), of een andere lijst die je al hebt. Die voeg je zo toe:
 
@@ -45,7 +56,7 @@ python scraper.py check
 - Blokkeert DuckDuckGo tijdelijk, dan stopt hij en bewaart hij wat al gevonden is; probeer het na een uur opnieuw, hij gaat verder waar hij was.
 - Een website telt alleen als het domein op de winkelnaam lijkt; een telefoonnummer alleen uit resultaten die over die winkel gaan.
 - Liever Google Maps? `python scraper.py verrijk --google-key SLEUTEL` gebruikt de Google Places API (creditcard nodig, binnen de gratis maandlimiet meestal €0).
-- Draai `discover` na `verrijk` niet opnieuw: dan wordt `winkels.csv` overschreven (de zoekcache blijft bewaard, dus opnieuw `verrijk` gaat snel).
+- `discover` voegt samen met de bestaande `winkels.csv`, dus wat `verrijk` gevonden heeft blijft bewaard.
 
 `check` haalt voortaan ook telefoonnummers van de websites zelf.
 

@@ -3,3 +3,4 @@ __pycache__/
 data/bezig.txt
 data/google_cache.jsonl
 data/zoek_cache.jsonl
+data/gidsen_cache.jsonl

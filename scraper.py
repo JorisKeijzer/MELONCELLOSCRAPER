@@ -8,10 +8,11 @@ Stappen:
 
 Gebruik:
     pip install -r requirements.txt
+    python scraper.py gidsen            # slijterijgidsen doorlopen -> data/gidsen.csv (±1-2 uur, gratis)
     python scraper.py discover          # -> data/winkels.csv
     python scraper.py check             # -> data/resultaat.csv (kan onderbroken en hervat worden)
     python scraper.py export            # -> data/alles.csv: alles in één lijst, beste leads bovenaan
-    python scraper.py all               # discover + check + export
+    python scraper.py all               # alles achter elkaar: gidsen, discover, verrijk, check, export
     python scraper.py verrijk           # winkels zonder website/telefoon gratis opzoeken (DuckDuckGo)
     python scraper.py verrijk --google-key SLEUTEL   # of via Google Maps (Places API)
 
@@ -217,16 +218,22 @@ def read_import(path):
 
 
 def discover(imports=()):
-    shops = {}
+    """Bouw data/winkels.csv: bestaande lijst (incl. 'verrijk'-resultaten) + handmatige lijst + OpenStreetMap
+    + gidsen + eigen imports. Bestaande gegevens blijven bewaard; dubbele winkels worden samengevoegd."""
+    index = ShopIndex()
+    add = index.add
+
+    if os.path.exists(SHOPS_CSV):
+        with open(SHOPS_CSV, newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f, delimiter=";"):
+                add(row)
+        print(f"{len(index.rows)} winkels uit de bestaande lijst behouden")
 
     if os.path.exists(SEED_CSV):
         with open(SEED_CSV, newline="", encoding="utf-8") as f:
             for row in csv.DictReader(f, delimiter=";"):
-                site = normalize_site(row["website"])
-                shops[domain(site)] = {
-                    "naam": row["bedrijf"], "plaats": row["plaats"], "adres": row["adres"], "website": site,
-                    "email": row["email"], "telefoon": row["telefoon"], "bron": "handmatig",
-                }
+                add({"naam": row["bedrijf"], "plaats": row["plaats"], "adres": row["adres"], "website": row["website"],
+                     "email": row["email"], "telefoon": row["telefoon"], "bron": "handmatig"})
 
     elements = []
     for url in OVERPASS_URLS:
@@ -239,47 +246,333 @@ def discover(imports=()):
         except (requests.RequestException, ValueError) as e:
             print(f"  mislukt: {e}")
     if not elements:
-        print("Geen enkele OpenStreetMap-server gaf antwoord. Probeer het over een paar minuten opnieuw.")
-    print(f"{len(elements)} winkels gevonden in OpenStreetMap")
-
-    for path in imports:
-        n = 0
-        for row in read_import(path):
-            site = normalize_site(row["website"])
-            key = domain(site) if site else f"import-{row['naam'].lower()}-{row['plaats'].lower()}"
-            if key in shops:
-                for k in ("email", "telefoon", "adres"):
-                    shops[key][k] = shops[key][k] or row[k]
-                continue
-            shops[key] = dict(row, website=site, bron=os.path.basename(path))
-            n += 1
-        print(f"{n} nieuwe winkels uit {path}")
-
+        print("Geen enkele OpenStreetMap-server gaf antwoord (de bestaande lijst blijft gewoon bewaard).")
+    n = 0
     for el in elements:
         t = el.get("tags", {})
-        site = normalize_site(t.get("website") or t.get("contact:website") or t.get("url"))
         street = " ".join(filter(None, [t.get("addr:street"), t.get("addr:housenumber")]))
-        adres = ", ".join(filter(None, [street, " ".join(filter(None, [t.get("addr:postcode"), t.get("addr:city")]))]))
-        row = {
-            "naam": t.get("name", ""), "plaats": t.get("addr:city", ""), "adres": adres, "website": site,
+        n += add({
+            "naam": t.get("name", ""), "plaats": t.get("addr:city", ""),
+            "adres": ", ".join(filter(None, [street, " ".join(filter(None, [t.get("addr:postcode"), t.get("addr:city")]))])),
+            "website": t.get("website") or t.get("contact:website") or t.get("url") or "",
             "email": t.get("email") or t.get("contact:email", ""),
-            "telefoon": t.get("phone") or t.get("contact:phone", ""), "bron": "openstreetmap",
-        }
-        if not site:
-            key = f"osm-{el['type']}-{el['id']}"
-        else:
-            key = domain(site)
-            if key in shops:  # ketens met één website: eerste vermelding houden, e-mail aanvullen
-                shops[key]["email"] = shops[key]["email"] or row["email"]
-                continue
-        shops[key] = row
+            "telefoon": normalize_phone(t.get("phone") or t.get("contact:phone", "")), "bron": "openstreetmap",
+        })
+    print(f"{len(elements)} winkels in OpenStreetMap, {n} nieuw")
+
+    sources = list(imports) + ([GIDSEN_CSV] if os.path.exists(GIDSEN_CSV) else [])
+    for path in sources:
+        n = 0
+        for row in (csv.DictReader(open(path, newline="", encoding="utf-8"), delimiter=";") if path == GIDSEN_CSV
+                    else read_import(path)):
+            n += add(dict(row, bron=row.get("bron") or os.path.basename(path)))
+        print(f"{n} nieuwe winkels uit {path}")
 
     with open(SHOPS_CSV, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=FIELDS, delimiter=";")
         w.writeheader()
-        w.writerows(shops.values())
-    no_site = sum(not s["website"] for s in shops.values())
-    print(f"{len(shops)} unieke winkels -> {SHOPS_CSV} ({no_site} zonder website: die komen wel in de lijst, maar worden niet gecheckt)")
+        w.writerows(index.rows)
+    no_site = sum(not s["website"] for s in index.rows)
+    print(f"{len(index.rows)} unieke winkels -> {SHOPS_CSV} ({no_site} zonder website)")
+
+
+# ----------------------------------------------------------------------------- stap 0: gidsen
+
+GIDSEN = {
+    # naam: startpagina's, welke paden gevolgd worden, en welke paden losse winkelpagina's zijn
+    "slijterindebuurt.nl": {
+        "start": ["https://slijterindebuurt.nl/slijters-per-provincie/"],
+        "follow": r"^/slijters-per-provincie/",
+        "detail": r"^/slijters-per-provincie/[^/]+/[^/]+/[^/]+/?$",
+    },
+    "slijterijen.com": {
+        "start": ["https://www.slijterijen.com/"],
+        "follow": r"^/[^/?#]+(/[^/?#]+)?/?$",
+        "detail": r"^/[^/?#]+/[^/?#]+/?$",
+    },
+    "slijterijindebuurt.nl": {
+        "start": ["https://slijterijindebuurt.nl/"],
+        "follow": r"^/[^/?#]+/?$",
+        "detail": r"^/[^/?#]+-\d+[a-z]?(-[a-z0-9]+)?/?$",
+    },
+}
+GIDSEN_CSV = os.path.join(DATA_DIR, "gidsen.csv")
+GIDSEN_CACHE_JSONL = os.path.join(DATA_DIR, "gidsen_cache.jsonl")
+GIDS_MAX_PAGES = 9000
+POSTCODE_RE = re.compile(r"\b(\d{4}\s?[A-Z]{2})\b")
+SKIP_PATH_RE = re.compile(r"/(wp-|feed|tag/|category/|author/|page/\d|zoek|search|login|account|cart|winkelwagen)|"
+                          r"\.(jpe?g|png|gif|webp|svg|pdf|css|js|xml|zip)$", re.I)
+BUSINESS_TYPES = ("localbusiness", "store", "liquorstore", "winery", "brewery", "foodestablishment", "organization",
+                  "shoppingcenter", "grocerystore", "barorpub")
+
+
+def _jsonld_objects(soup):
+    for tag in soup.find_all("script", type="application/ld+json"):
+        try:
+            data = json.loads(tag.string or "")
+        except (ValueError, TypeError):
+            continue
+        stack = [data]
+        while stack:
+            obj = stack.pop()
+            if isinstance(obj, list):
+                stack.extend(obj)
+            elif isinstance(obj, dict):
+                yield obj
+                for k in ("@graph", "itemListElement", "item", "mainEntity", "containsPlace"):
+                    if k in obj:
+                        stack.append(obj[k])
+
+
+def _types(obj):
+    t = obj.get("@type", "")
+    return [x.lower() for x in (t if isinstance(t, list) else [t]) if isinstance(x, str)]
+
+
+def records_from_jsonld(soup, gids):
+    out = []
+    for obj in _jsonld_objects(soup):
+        if not any(t in BUSINESS_TYPES for t in _types(obj)):
+            continue
+        name = obj.get("name") or ""
+        addr = obj.get("address") or {}
+        if isinstance(addr, list):
+            addr = addr[0] if addr else {}
+        if isinstance(addr, str):
+            street, postcode, city = addr, "", ""
+        else:
+            street, postcode, city = addr.get("streetAddress", ""), addr.get("postalCode", ""), addr.get("addressLocality", "")
+        if not name or not (street or postcode or obj.get("telephone")):
+            continue  # waarschijnlijk de gids zelf (Organization zonder adres)
+        site = obj.get("url") or ""
+        same = obj.get("sameAs") or []
+        cands = [site] + (same if isinstance(same, list) else [same])
+        site = next((normalize_site(u) for u in cands if isinstance(u, str) and u.startswith("http")
+                     and not is_directory(u) and gids not in u), "")
+        out.append({"naam": name.strip(), "plaats": city.strip(),
+                    "adres": ", ".join(filter(None, [street.strip(), " ".join(filter(None, [postcode, city]))])),
+                    "website": site, "email": (obj.get("email") or "").replace("mailto:", "").strip().lower(),
+                    "telefoon": normalize_phone(str(obj.get("telephone") or "")), "bron": gids})
+    return out
+
+
+def record_from_page(soup, url, gids, own=frozenset()):
+    """Terugval als een winkelpagina geen gestructureerde gegevens heeft: h1, postcode, telefoon, externe website."""
+    h1 = soup.find("h1")
+    if not h1:
+        return None
+    name = re.sub(r"\s+", " ", h1.get_text(" ", strip=True))
+    name = re.sub(r"^(slijterij\s+)?(informatie over|bekijk|welkom bij)\s+", "", name, flags=re.I)
+    text = soup.get_text("\n")
+    m = POSTCODE_RE.search(text)
+    adres, plaats = "", ""
+    if m:
+        lines = [l.strip() for l in text[:m.end() + 60].splitlines() if l.strip()]
+        idx = next((i for i, l in enumerate(lines) if m.group(1) in l), None)
+        if idx is not None:
+            pc_line = lines[idx]
+            street = lines[idx - 1] if idx > 0 and re.search(r"\d", lines[idx - 1]) and len(lines[idx - 1]) < 60 else ""
+            plaats = pc_line.split(m.group(1), 1)[1].strip(" ,") or ""
+            adres = ", ".join(filter(None, [street, pc_line if len(pc_line) < 60 else m.group(1)]))
+    phones = [p for p in extract_phones(str(soup)) if p not in own]
+    site = ""
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        if href.startswith("http") and gids not in href and not is_directory(href):
+            label = a.get_text(" ", strip=True).lower()
+            if "website" in label or domain_matches_name(href, name):
+                site = normalize_site(href)
+                break
+    emails = [e for e in extract_emails(str(soup)) if e not in own and gids not in e
+              and not is_directory("https://" + e.split("@")[-1])]
+    if not name or not (adres or phones):
+        return None
+    return {"naam": name, "plaats": plaats.split(",")[0].strip().title() if plaats.isupper() else plaats.split(",")[0].strip(),
+            "adres": adres, "website": site, "email": emails[0] if emails else "",
+            "telefoon": phones[0] if phones else "", "bron": gids}
+
+
+def _gids_page(url, gids, cfg, rp, own=frozenset()):
+    if not rp.can_fetch(USER_AGENT, url):
+        return {"url": url, "records": [], "links": []}
+    html, final = fetch(url)
+    time.sleep(0.3)
+    if not html:
+        return {"url": url, "records": [], "links": []}
+    soup = BeautifulSoup(html, "html.parser")
+    base = f"{urlparse(url).scheme}://{urlparse(url).netloc}"
+    links = []
+    for a in soup.find_all("a", href=True):
+        link = urljoin(final or url, a["href"]).split("#")[0].split("?")[0]
+        p = urlparse(link)
+        if p.netloc.lower().removeprefix("www.") == gids and re.search(cfg["follow"], p.path) \
+                and not SKIP_PATH_RE.search(p.path):
+            links.append(base + p.path)
+    records = records_from_jsonld(soup, gids)
+    if not records and re.search(cfg["detail"], urlparse(url).path):
+        rec = record_from_page(soup, url, gids, own)
+        if rec:
+            records = [rec]
+    return {"url": url, "records": records, "links": list(dict.fromkeys(links))}
+
+
+def _gids_sitemap_urls(base, gids, cfg):
+    _, sitemaps = robots_for(base)
+    queue = list(dict.fromkeys(sitemaps + [base + p for p in ("/sitemap.xml", "/sitemap_index.xml", "/wp-sitemap.xml")]))
+    seen, urls = set(), []
+    while queue and len(seen) < 200:
+        sm = queue.pop(0)
+        if sm in seen:
+            continue
+        seen.add(sm)
+        content, _ = fetch(sm, binary=True)
+        if not content:
+            continue
+        if content[:2] == b"\x1f\x8b":
+            try:
+                content = gzip.decompress(content)
+            except OSError:
+                continue
+        try:
+            root = ET.fromstring(content)
+        except ET.ParseError:
+            continue
+        for loc in root.iter():
+            if loc.tag.endswith("loc") and loc.text:
+                link = loc.text.strip()
+                if root.tag.endswith("sitemapindex"):
+                    queue.append(link)
+                else:
+                    p = urlparse(link)
+                    if re.search(cfg["follow"], p.path) and not SKIP_PATH_RE.search(p.path):
+                        urls.append(base + p.path)
+    return urls
+
+
+def gidsen(only=None, workers=4):
+    """Loop openbare slijterijgidsen door (sitemap + links volgen) en schrijf alle winkels naar data/gidsen.csv."""
+    done = {}
+    if os.path.exists(GIDSEN_CACHE_JSONL):
+        with open(GIDSEN_CACHE_JSONL, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    r = json.loads(line)
+                    done[r["url"]] = r
+                except (ValueError, KeyError):
+                    pass
+    with open(GIDSEN_CACHE_JSONL, "a", encoding="utf-8") as cache_f:
+        for gids, cfg in GIDSEN.items():
+            if only and gids not in only:
+                continue
+            base = cfg["start"][0].split("/", 3)
+            base = f"{base[0]}//{base[2]}"
+            print(f"\n== {gids} ==")
+            rp, _ = robots_for(base)
+            # contactgegevens van de gids zelf (header/footer) staan ook op de startpagina: die negeren
+            home, _ = fetch(cfg["start"][0])
+            own = frozenset(extract_phones(home) + list(extract_emails(home))) if home else frozenset()
+            queue = list(dict.fromkeys(cfg["start"] + _gids_sitemap_urls(base, gids, cfg)))
+            print(f"{len(queue)} pagina's uit de sitemap/startpagina's; links worden gevolgd (max {GIDS_MAX_PAGES})")
+            seen = set()
+            n_records = 0
+            with ThreadPoolExecutor(workers) as pool:
+                while queue and len(seen) < GIDS_MAX_PAGES:
+                    batch = []
+                    while queue and len(batch) < workers * 5:
+                        u = queue.pop(0)
+                        if u not in seen:
+                            seen.add(u)
+                            batch.append(u)
+                    todo = [u for u in batch if u not in done]
+                    for r in pool.map(lambda u: _gids_page(u, gids, cfg, rp, own), todo):
+                        done[r["url"]] = r
+                        cache_f.write(json.dumps(r, ensure_ascii=False) + "\n")
+                    cache_f.flush()
+                    for u in batch:
+                        r = done.get(u, {})
+                        n_records += len(r.get("records", []))
+                        queue.extend(l for l in r.get("links", []) if l not in seen)
+                    print(f"  {len(seen)} pagina's bekeken, {n_records} winkelvermeldingen", end="\r", flush=True)
+            print(f"  {len(seen)} pagina's bekeken, {n_records} winkelvermeldingen")
+
+    # alle vermeldingen samenvoegen tot unieke winkels
+    records = [rec for r in done.values() for rec in r.get("records", []) if not only or rec["bron"] in only]
+    # telefoonnummers/e-mails die bij heel veel vermeldingen staan zijn van de gids zelf
+    for field in ("telefoon", "email"):
+        counts = {}
+        for rec in records:
+            counts[rec[field]] = counts.get(rec[field], 0) + 1
+        for rec in records:
+            if rec[field] and counts[rec[field]] > 8:
+                rec[field] = ""
+    index = ShopIndex()
+    for rec in records:
+        index.add(rec)
+    with open(GIDSEN_CSV, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=FIELDS, delimiter=";")
+        w.writeheader()
+        w.writerows(index.rows)
+    print(f"\nKlaar: {len(index.rows)} unieke winkels uit de gidsen -> {GIDSEN_CSV}")
+    print("Draai nu 'python scraper.py discover' om ze aan je winkellijst toe te voegen.")
+
+
+def clean_name(name):
+    return " ".join(re.findall(r"[a-z0-9]+", NAME_NOISE.sub(" ", (name or "").lower())))
+
+
+def merge_shop(into, other):
+    for k in ("naam", "plaats", "adres", "website", "email", "telefoon"):
+        if not into.get(k) and other.get(k):
+            into[k] = other[k]
+    if other.get("bron") and other["bron"] not in into.get("bron", ""):
+        into["bron"] = f"{into['bron']}+{other['bron']}" if into.get("bron") else other["bron"]
+
+
+class ShopIndex:
+    """Unieke winkels: zelfde website = zelfde winkel, en anders zelfde (opgeschoonde) naam + postcode of plaats."""
+
+    def __init__(self):
+        self.rows, self.by_site, self.by_name = [], {}, {}
+
+    @staticmethod
+    def name_keys(s):
+        name = clean_name(s.get("naam")) or (s.get("naam") or "").lower().strip()
+        if not name:
+            return []
+        keys = []
+        m = POSTCODE_RE.search((s.get("adres") or "").upper())
+        if m:
+            keys.append(f"{name}|{m.group(1).replace(' ', '')}")
+        plaats = (s.get("plaats") or "").lower().strip()
+        keys.append(f"{name}|{plaats}")
+        return keys
+
+    def add(self, row):
+        """Voegt toe of voegt samen; geeft True terug als het een nieuwe winkel is."""
+        row = {k: (row.get(k) or "").strip() for k in FIELDS}
+        row["website"] = normalize_site(row["website"])
+        if not row["naam"] and not row["website"]:
+            return False
+        site = domain(row["website"]) if row["website"] else ""
+        target = self.by_site.get(site) if site else None
+        if target is None:
+            for k in self.name_keys(row):
+                cand = self.by_name.get(k)
+                # alleen samenvoegen op naam als de websites niet botsen (ketens hebben per filiaal geen eigen site)
+                if cand is not None and (not site or not cand["website"] or domain(cand["website"]) == site):
+                    target = cand
+                    break
+        new = target is None
+        if new:
+            target = row
+            self.rows.append(row)
+        else:
+            merge_shop(target, row)
+        if target["website"]:
+            self.by_site.setdefault(domain(target["website"]), target)
+        for k in self.name_keys(target) + self.name_keys(row):
+            self.by_name.setdefault(k, target)
+        return new
 
 
 # ----------------------------------------------------------------------------- stap 2: check
@@ -834,7 +1127,7 @@ def export():
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("stap", choices=["discover", "verrijk", "check", "export", "all"])
+    p.add_argument("stap", choices=["gidsen", "discover", "verrijk", "check", "export", "all"])
     p.add_argument("--google-key", default=os.environ.get("GOOGLE_MAPS_API_KEY", ""),
                    help="optioneel: Google Maps API-sleutel voor 'verrijk' (standaard gratis via DuckDuckGo)")
     p.add_argument("--extra", help="bestand met extra website-URL's, één per regel")
@@ -846,9 +1139,11 @@ def main():
                         "dan wordt alleen die ene site overgeslagen)")
     args = p.parse_args()
     os.makedirs(DATA_DIR, exist_ok=True)
+    if args.stap in ("gidsen", "all"):
+        gidsen()
     if args.stap in ("discover", "all"):
         discover(args.imports)
-    if args.stap == "verrijk":
+    if args.stap in ("verrijk", "all"):
         verrijk(args.google_key)
     if args.stap in ("check", "all"):
         if args.opnieuw:
