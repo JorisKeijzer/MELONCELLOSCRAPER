@@ -6,7 +6,7 @@ Vindt Nederlandse slijterijen, drankwinkels en webshops die **Dolce Cilento (mel
 
 | Bestand | Inhoud |
 |---|---|
-| `data/dolce_cilento_verkooppunten_nl.csv` | Handmatig gevonden lijst: 20 verkooppunten met e-mail, telefoon, adres en link naar de productpagina |
+| `data/dolce_cilento_verkooppunten_nl.csv` | Handmatig gevonden lijst: 22 verkooppunten (alle Dolce Cilento-producten, incl. topSlijter-hoofdkantoor) met e-mail, telefoon, adres en link naar de productpagina |
 | `scraper.py` | Automatische scraper voor alle slijterijen in NL |
 
 ## Automatisch alle slijterijen checken
