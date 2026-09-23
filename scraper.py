@@ -592,6 +592,17 @@ PHONE_TRUST_DOMAINS = ("openingstijden.nl", "telefoonboek.nl", "detelefoongids.n
                        "slijterijindebuurt.nl", "slijterindebuurt.nl", "vind-open.nl", "firmania.nl", "bottin.nl")
 
 
+# ketens: filialen hebben geen eigen website/inkoop; één contact via het hoofdkantoor is genoeg
+CHAIN_RE = re.compile(
+    r"^\s*(gall\s*(&|en|and)?\s*gall|mitra|dirck\s*(iii|3)|albert\s*heijn|ah\b|jumbo|lidl|aldi|plus\b|coop\b|spar\b|"
+    r"vomar|dekamarkt|hoogvliet|dirk\b|poiesz|boni\b|jan\s*linders|nettorama|em-?t[eé]|mcd\b|hema\b|action\b|"
+    r"drankdozijn|drankenhandel\s*dirck)", re.I)
+
+
+def is_chain(name):
+    return bool(CHAIN_RE.search(name or ""))
+
+
 class Blocked(Exception):
     pass
 
@@ -685,9 +696,11 @@ def verrijk(key=""):
                 except (ValueError, KeyError):
                     pass
 
-    todo = [s for s in shops if s["naam"] and (not s["website"] or not s["telefoon"])]
+    no_site = [s for s in shops if s["naam"] and not s["website"]]
+    todo = [s for s in no_site if not is_chain(s["naam"])]
     left = sum(_gkey(s) not in cache for s in todo)
-    print(f"{len(todo)} winkels zonder website of telefoon, {len(todo) - left} al opgezocht. "
+    print(f"{len(no_site) - len(todo)} ketenfilialen (Gall & Gall, Mitra, ...) overgeslagen.")
+    print(f"{len(todo)} winkels zonder website, {len(todo) - left} al opgezocht. "
           f"Opzoeken via {label}" + (f" (~{left * 5 // 60} minuten)" if not key else "") + "...")
     found_sites = found_phones = 0
     blocked = False
