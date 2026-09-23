@@ -426,6 +426,18 @@ def load_cache():
     return done
 
 
+def drop_skipped():
+    """Haal overgeslagen sites uit de cache zodat ze opnieuw gecheckt worden."""
+    if not os.path.exists(CACHE_JSONL):
+        return
+    with open(CACHE_JSONL, encoding="utf-8") as f:
+        lines = f.readlines()
+    keep = [line for line in lines if '"overgeslagen:' not in line]
+    with open(CACHE_JSONL, "w", encoding="utf-8") as f:
+        f.writelines(keep)
+    print(f"{len(lines) - len(keep)} overgeslagen sites worden één voor één opnieuw geprobeerd")
+
+
 def check(extra_file=None, workers=8):
     with open(SHOPS_CSV, newline="", encoding="utf-8") as f:
         all_shops = list(csv.DictReader(f, delimiter=";"))
@@ -495,11 +507,17 @@ def main():
     p.add_argument("--import", dest="imports", action="append", default=[],
                    help="eigen CSV met winkels (bijv. KvK-export); mag vaker gebruikt worden")
     p.add_argument("--workers", type=int, default=8, help="aantal websites tegelijk (standaard 8)")
+    p.add_argument("--opnieuw", action="store_true",
+                   help="overgeslagen sites één voor één opnieuw proberen (stopt macOS het proces weer, "
+                        "dan wordt alleen die ene site overgeslagen)")
     args = p.parse_args()
     os.makedirs(DATA_DIR, exist_ok=True)
     if args.stap in ("discover", "all"):
         discover(args.imports)
     if args.stap in ("check", "all"):
+        if args.opnieuw:
+            drop_skipped()
+            args.workers = 1
         check(args.extra, args.workers)
 
 
