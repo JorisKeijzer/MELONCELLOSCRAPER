@@ -32,6 +32,17 @@ python scraper.py check
 
 Kolomnamen worden automatisch herkend (bijv. `Handelsnaam`, `Vestigingsplaats`, `Internetadres`, `Telefoonnummer`, `E-mail`). Zowel `;` als `,` werkt als scheidingsteken. Winkels zonder website komen ook in `resultaat.csv`, met status "onbekend" en de contactgegevens die bekend zijn.
 
+### Winkels zonder website: Google Maps
+
+Voor winkels zonder website zoekt `verrijk` naam + plaats op in Google Maps (Places API) en vult telefoonnummer en website aan. Nieuw gevonden websites worden daarna door `check` gewoon gecheckt, ook op e-mailadressen.
+
+```bash
+python scraper.py verrijk --google-key JOUW_SLEUTEL
+python scraper.py check
+```
+
+Een resultaat wordt alleen overgenomen als de naam in Google overeenkomt met de winkel, zodat je niet per ongeluk de Gall & Gall om de hoek krijgt. Opgezochte winkels worden bewaard in `data/google_cache.jsonl`, dus bij een tweede keer betaal je niet opnieuw. Draai `discover` na `verrijk` niet opnieuw: dan wordt `winkels.csv` overschreven (de Google-cache blijft wel bestaan, dus opnieuw `verrijk` kost niets).
+
 ### Uitkomst lezen
 
 - `verkoopt_dolce_cilento = ja`: gevonden. `gevonden_urls` laat zien waar, zodat je het kunt controleren.

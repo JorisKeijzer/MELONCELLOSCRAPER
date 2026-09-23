@@ -11,6 +11,7 @@ Gebruik:
     python scraper.py discover          # -> data/winkels.csv
     python scraper.py check             # -> data/resultaat.csv (kan onderbroken en hervat worden)
     python scraper.py all               # beide
+    python scraper.py verrijk --google-key SLEUTEL   # winkels zonder website opzoeken in Google Maps
 
     python scraper.py check --extra urls.txt   # extra websites (één per regel) meenemen
     python scraper.py discover --import kvk_slijterijen.csv   # eigen lijst (bv. KvK-export) toevoegen
@@ -18,6 +19,7 @@ Gebruik:
 
 import argparse
 import csv
+import difflib
 import gzip
 import json
 import os
@@ -500,9 +502,109 @@ def check(extra_file=None, workers=8):
     print(f"\nKlaar: {hits} winkels verkopen Dolce Cilento -> {RESULT_CSV} (bovenaan de lijst)")
 
 
+# ----------------------------------------------------------------------------- stap 1b: verrijk (Google Maps)
+
+GOOGLE_PLACES_URL = os.environ.get("GOOGLE_PLACES_URL", "https://places.googleapis.com/v1/places:searchText")
+GOOGLE_CACHE_JSONL = os.path.join(DATA_DIR, "google_cache.jsonl")
+GOOGLE_FIELDS = "places.displayName,places.formattedAddress,places.nationalPhoneNumber,places.websiteUri"
+NAME_NOISE = re.compile(r"\b(slijterij|wijnhandel|wijnkoperij|drankenhandel|dranken|drankhandel|b\.?v\.?|v\.?o\.?f\.?|"
+                        r"en|&|de|het|van|'t)\b", re.I)
+
+
+def name_similarity(a, b):
+    clean = lambda x: " ".join(NAME_NOISE.sub(" ", x.lower()).split())
+    a, b = clean(a), clean(b)
+    if not a or not b:
+        return 0.0
+    if a in b or b in a:
+        return 1.0
+    return difflib.SequenceMatcher(None, a, b).ratio()
+
+
+def google_lookup(shop, key):
+    query = ", ".join(filter(None, [shop["naam"], shop["adres"] or shop["plaats"]]))
+    r = requests.post(
+        GOOGLE_PLACES_URL,
+        json={"textQuery": query, "regionCode": "NL", "languageCode": "nl", "pageSize": 3},
+        headers={"X-Goog-Api-Key": key, "X-Goog-FieldMask": GOOGLE_FIELDS},
+        timeout=20,
+    )
+    if r.status_code in (401, 403):
+        raise SystemExit(f"Google weigert de API-sleutel ({r.status_code}): {r.text[:300]}")
+    r.raise_for_status()
+    for place in r.json().get("places", []):
+        found = place.get("displayName", {}).get("text", "")
+        if name_similarity(shop["naam"], found) >= 0.6:
+            return {"google_naam": found, "adres": place.get("formattedAddress", ""),
+                    "telefoon": place.get("nationalPhoneNumber", ""), "website": place.get("websiteUri", "")}
+    return {}
+
+
+def verrijk(key):
+    """Zoek winkels zonder website of telefoonnummer op in Google Maps (Places API) en vul website/telefoon aan."""
+    if not key:
+        raise SystemExit("Geen Google API-sleutel. Gebruik --google-key SLEUTEL of zet GOOGLE_MAPS_API_KEY.")
+    with open(SHOPS_CSV, newline="", encoding="utf-8") as f:
+        shops = list(csv.DictReader(f, delimiter=";"))
+
+    cache = {}
+    if os.path.exists(GOOGLE_CACHE_JSONL):
+        with open(GOOGLE_CACHE_JSONL, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    r = json.loads(line)
+                    cache[r["_key"]] = r
+                except (ValueError, KeyError):
+                    pass
+
+    todo = [s for s in shops if s["naam"] and (not s["website"] or not s["telefoon"])]
+    print(f"{len(todo)} winkels zonder website of telefoon, {sum(k in cache for k in map(_gkey, todo))} al opgezocht")
+    found_sites = found_phones = 0
+    with open(GOOGLE_CACHE_JSONL, "a", encoding="utf-8") as cache_f:
+        for i, shop in enumerate(todo, 1):
+            k = _gkey(shop)
+            if k not in cache:
+                try:
+                    cache[k] = dict(google_lookup(shop, key), _key=k)
+                except requests.RequestException as e:
+                    print(f"[{i}/{len(todo)}] {shop['naam']}: fout ({e})")
+                    continue
+                cache_f.write(json.dumps(cache[k], ensure_ascii=False) + "\n")
+                cache_f.flush()
+                time.sleep(0.1)
+            g = cache[k]
+            new_site = normalize_site(g.get("website", "")) if not shop["website"] else ""
+            if new_site:
+                shop["website"] = new_site
+                found_sites += 1
+            if not shop["telefoon"] and g.get("telefoon"):
+                shop["telefoon"] = g["telefoon"]
+                found_phones += 1
+            if not shop["adres"] and g.get("adres"):
+                shop["adres"] = g["adres"]
+            if g:
+                shop["bron"] = shop["bron"] + "+google" if "google" not in shop["bron"] else shop["bron"]
+            print(f"[{i}/{len(todo)}] {shop['naam']}: " + (", ".join(filter(None, [
+                new_site and f"website {new_site}", g.get("telefoon") and f"tel {g['telefoon']}"])) or "niets gevonden"))
+
+    # ketens: nieuwe websites kunnen samenvallen met al bekende; dubbele domeinen zijn geen probleem voor check()
+    with open(SHOPS_CSV, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=FIELDS, delimiter=";")
+        w.writeheader()
+        w.writerows(shops)
+    print(f"\nKlaar: {found_sites} nieuwe websites en {found_phones} nieuwe telefoonnummers -> {SHOPS_CSV}")
+    print("Draai nu 'python scraper.py check' om de nieuwe websites te checken en e-mailadressen op te halen.")
+
+
+def _gkey(shop):
+    return f"{shop['naam']}|{shop['adres'] or shop['plaats']}".lower()
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("stap", choices=["discover", "check", "all"])
+    p.add_argument("stap", choices=["discover", "verrijk", "check", "all"])
+    p.add_argument("--google-key", default=os.environ.get("GOOGLE_MAPS_API_KEY", ""),
+                   help="Google Maps API-sleutel voor 'verrijk' (of zet GOOGLE_MAPS_API_KEY)")
     p.add_argument("--extra", help="bestand met extra website-URL's, één per regel")
     p.add_argument("--import", dest="imports", action="append", default=[],
                    help="eigen CSV met winkels (bijv. KvK-export); mag vaker gebruikt worden")
@@ -514,6 +616,8 @@ def main():
     os.makedirs(DATA_DIR, exist_ok=True)
     if args.stap in ("discover", "all"):
         discover(args.imports)
+    if args.stap == "verrijk":
+        verrijk(args.google_key)
     if args.stap in ("check", "all"):
         if args.opnieuw:
             drop_skipped()
