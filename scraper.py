@@ -37,6 +37,7 @@ SEED_CSV = os.path.join(DATA_DIR, "dolce_cilento_verkooppunten_nl.csv")
 SHOPS_CSV = os.path.join(DATA_DIR, "winkels.csv")
 CACHE_JSONL = os.path.join(DATA_DIR, "cache.jsonl")
 RESULT_CSV = os.path.join(DATA_DIR, "resultaat.csv")
+BUSY_FILE = os.path.join(DATA_DIR, "bezig.txt")
 
 OVERPASS_URLS = [
     "https://overpass-api.de/api/interpreter",
@@ -368,6 +369,50 @@ def check_shop(shop):
     return result
 
 
+class BusyTracker:
+    """Houdt in data/bezig.txt bij welke sites nu gecheckt worden. Wordt het proces van buitenaf gestopt
+    (bijv. door macOS die een verdachte website blokkeert), dan worden die sites bij de volgende start overgeslagen."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.busy = set()
+
+    def _write(self):
+        with open(BUSY_FILE, "w", encoding="utf-8") as f:
+            f.write("\n".join(sorted(self.busy)))
+            f.flush()
+            os.fsync(f.fileno())
+
+    def start(self, site):
+        with self.lock:
+            self.busy.add(site)
+            self._write()
+
+    def done(self, site):
+        with self.lock:
+            self.busy.discard(site)
+            self._write()
+
+
+def skip_crashed(cache, cache_f):
+    """Sites die bezig waren toen het proces de vorige keer werd gestopt: markeren als overgeslagen."""
+    if not os.path.exists(BUSY_FILE):
+        return
+    with open(BUSY_FILE, encoding="utf-8") as f:
+        crashed = [line.strip() for line in f if line.strip()]
+    for site in crashed:
+        if domain(site) in cache:
+            continue
+        r = {"naam": domain(site), "website": site, "verkoopt_dolce_cilento": "onbekend", "meloncello_gevonden": "",
+             "emails": "", "gevonden_urls": "", "methode": "",
+             "fout": "overgeslagen: proces werd gestopt tijdens het checken van deze site (mogelijk verdachte website)"}
+        cache_f.write(json.dumps(r, ensure_ascii=False) + "\n")
+        cache[domain(site)] = r
+        print(f"Overgeslagen (proces stopte hierbij): {site}")
+    cache_f.flush()
+    os.remove(BUSY_FILE)
+
+
 def load_cache():
     done = {}
     if os.path.exists(CACHE_JSONL):
@@ -399,12 +444,28 @@ def check(extra_file=None, workers=8):
     for s in shops:
         unique.setdefault(domain(s["website"]), s)
     cache = load_cache()
+    with open(CACHE_JSONL, "a", encoding="utf-8") as cache_f:
+        skip_crashed(cache, cache_f)
+    # overgeslagen sites alsnog met naam/adres uit de winkellijst tonen
+    for d, s in unique.items():
+        if d in cache and cache[d].get("fout", "").startswith("overgeslagen"):
+            cache[d] = dict(cache[d], **{k: s.get(k, "") for k in ("naam", "plaats", "adres", "telefoon")},
+                            emails=cache[d]["emails"] or s.get("email", ""))
     todo = [s for d, s in unique.items() if d not in cache]
     print(f"{len(unique)} websites, {len(cache)} al gedaan, {len(todo)} te checken met {workers} threads...")
 
     lock = threading.Lock()
+    tracker = BusyTracker()
+
+    def run(shop):
+        tracker.start(shop["website"])
+        try:
+            return check_shop(shop)
+        finally:
+            tracker.done(shop["website"])
+
     with open(CACHE_JSONL, "a", encoding="utf-8") as cache_f, ThreadPoolExecutor(workers) as pool:
-        futures = {pool.submit(check_shop, s): s for s in todo}
+        futures = {pool.submit(run, s): s for s in todo}
         for i, fut in enumerate(as_completed(futures), 1):
             r = fut.result()
             with lock:
