@@ -1,2 +1,3 @@
 requests>=2.31
 beautifulsoup4>=4.12
+urllib3<2  # macOS system Python uses LibreSSL

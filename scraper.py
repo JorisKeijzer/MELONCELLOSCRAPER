@@ -41,7 +41,13 @@ RESULT_CSV = os.path.join(DATA_DIR, "resultaat.csv")
 OVERPASS_URLS = [
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
+    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
 ]
+OVERPASS_HEADERS = {
+    "User-Agent": "meloncelloscraper/2.0 (+https://github.com/joriskeijzer/meloncelloscraper)",
+    "Accept": "application/json",
+}
 OVERPASS_QUERY = """
 [out:json][timeout:180];
 area["ISO3166-1"="NL"][admin_level=2]->.nl;
@@ -195,12 +201,14 @@ def discover(imports=()):
     for url in OVERPASS_URLS:
         try:
             print(f"OpenStreetMap ophalen via {url} (kan 1-3 minuten duren)...")
-            r = requests.post(url, data={"data": OVERPASS_QUERY}, timeout=300, headers={"User-Agent": USER_AGENT})
+            r = requests.post(url, data={"data": OVERPASS_QUERY}, timeout=300, headers=OVERPASS_HEADERS)
             r.raise_for_status()
             elements = r.json()["elements"]
             break
         except (requests.RequestException, ValueError) as e:
             print(f"  mislukt: {e}")
+    if not elements:
+        print("Geen enkele OpenStreetMap-server gaf antwoord. Probeer het over een paar minuten opnieuw.")
     print(f"{len(elements)} winkels gevonden in OpenStreetMap")
 
     for path in imports:
